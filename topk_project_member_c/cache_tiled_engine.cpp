@@ -1,6 +1,6 @@
 #include "cache_tiled_engine.h"
-#include "mock_simd_kernel.h"   // <-- Week 10: replace with Member B's real kernel
-// #include "simd_bitonic_kernel.h"  // Member B's final implementation
+//#include "mock_simd_kernel.h" 
+#include "../topk_project_member_b/simd_bitonic_kernel.h"
 
 #include <algorithm>
 #include <vector>
