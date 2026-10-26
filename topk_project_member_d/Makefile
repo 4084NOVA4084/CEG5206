@@ -6,6 +6,7 @@
 CXX        ?= g++
 UNAME_S    := $(shell uname -s)
 BUILD      := build
+A_DIR      := ../topk_project_member_a
 B_DIR      := ../topk_project_member_b
 C_DIR      := ../topk_project_member_c
 
@@ -35,8 +36,9 @@ endif
 CXXFLAGS += $(OMP_CFLAGS)
 LDFLAGS  += $(OMP_LDFLAGS)
 
-ENGINE_SRC := parallel_topk.cpp $(C_DIR)/cache_tiled_engine.cpp
-ENGINE_HDR := parallel_topk.h reference_baselines.h $(C_DIR)/cache_tiled_engine.h \
+ENGINE_SRC := parallel_topk.cpp $(C_DIR)/cache_tiled_engine.cpp \
+              $(A_DIR)/topk_minheap.cpp $(A_DIR)/topk_nth_element.cpp
+ENGINE_HDR := parallel_topk.h $(A_DIR)/topk_baselines.h $(C_DIR)/cache_tiled_engine.h \
               $(B_DIR)/simd_bitonic_kernel.h
 BENCH_HDR  := bench/bench_common.h bench/perf_control.h
 

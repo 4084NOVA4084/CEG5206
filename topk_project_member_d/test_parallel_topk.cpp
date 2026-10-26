@@ -1,5 +1,5 @@
 #include "parallel_topk.h"
-#include "reference_baselines.h"
+#include "../topk_project_member_a/topk_baselines.h"
 #include "../topk_project_member_c/cache_tiled_engine.h"
 
 #include <algorithm>
@@ -163,8 +163,8 @@ std::vector<NamedKernel> make_kernels() {
         {"tiled(B=24)", [](const float* in, size_t n, size_t k, float* out) {
              topk_tiled(in, n, k, out, 24);
          }},
-        {"minheap", topk_minheap_baseline},
-        {"nth_element", topk_nth_element_baseline},
+        {"minheap", topk_minheap},
+        {"nth_element", topk_nth_element},
     };
 }
 
@@ -265,6 +265,13 @@ void test_end_to_end(const std::vector<int>& thread_counts) {
         for (size_t K : ds.ks) {
             const std::vector<float> expected = oracle_topk(ds.data, K);
             for (const NamedKernel& kernel : kernels) {
+                // Raw kernel first: the wrapper's canonicalize() would hide unsorted or NaN output.
+                if (K <= N) {
+                    std::vector<float> raw(K, 42.0f);
+                    kernel.fn(ds.data.data(), N, K, raw.data());
+                    check(same_values(raw, expected),
+                          ds.name + " | K=" + std::to_string(K) + " | " + kernel.name + " | raw");
+                }
                 for (MergeStrategy strategy : strategies) {
                     for (int P : thread_counts) {
                         ParallelTopKConfig cfg;

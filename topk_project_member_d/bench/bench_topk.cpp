@@ -1,7 +1,7 @@
 #include "bench_common.h"
 #include "perf_control.h"
 #include "../parallel_topk.h"
-#include "../reference_baselines.h"
+#include "../../topk_project_member_a/topk_baselines.h"
 #include "../../topk_project_member_c/cache_tiled_engine.h"
 
 #include <cstdio>
@@ -86,8 +86,8 @@ bool is_parallel(const std::string& algo) { return algo.rfind("omp_", 0) == 0; }
 bool uses_tile(const std::string& algo) { return algo == "tiled" || algo == "omp_tiled"; }
 
 topk_kernel_fn single_thread_kernel(const std::string& algo, size_t tile) {
-    if (algo == "heap" || algo == "omp_heap") return topk_minheap_baseline;
-    if (algo == "nth" || algo == "omp_nth") return topk_nth_element_baseline;
+    if (algo == "heap" || algo == "omp_heap") return topk_minheap;
+    if (algo == "nth" || algo == "omp_nth") return topk_nth_element;
     if (algo == "tiled" || algo == "omp_tiled") {
         return [tile](const float* in, size_t n, size_t k, float* out) {
             topk_tiled(in, n, k, out, tile);
