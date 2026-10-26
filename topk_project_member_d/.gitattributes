@@ -1,0 +1,4 @@
+# Windows checkouts with core.autocrlf would add CR, which breaks bash, shebangs and make.
+*.sh      text eol=lf
+*.py      text eol=lf
+Makefile  text eol=lf
