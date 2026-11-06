@@ -17,6 +17,11 @@
 // ============================================================
 std::vector<float> oracle_topk(const std::vector<float>& input, size_t K) {
     std::vector<double> tmp(input.begin(), input.end());
+    for (double& value : tmp) {
+        if (std::isnan(value)) {
+            value = -std::numeric_limits<double>::infinity();
+        }
+    }
     std::sort(tmp.begin(), tmp.end(), std::greater<double>());
     std::vector<float> result(K);
     for (size_t i = 0; i < K; ++i) result[i] = (float)tmp[i];
@@ -26,13 +31,9 @@ std::vector<float> oracle_topk(const std::vector<float>& input, size_t K) {
 // ============================================================
 // Comparison helper: check two Top-K result sets are equal
 // ============================================================
-bool results_match(std::vector<float>& a, std::vector<float>& b) {
+bool results_match(const std::vector<float>& a, const std::vector<float>& b) {
     if (a.size() != b.size()) return false;
-    std::sort(a.begin(), a.end());
-    std::sort(b.begin(), b.end());
     for (size_t i = 0; i < a.size(); ++i) {
-        // Handle NaN
-        if (std::isnan(a[i]) && std::isnan(b[i])) continue;
         if (a[i] != b[i]) return false;
     }
     return true;
@@ -57,8 +58,7 @@ void run_test(const std::string& name,
 
     std::vector<float> expected = oracle_topk(input, K);
 
-    std::vector<float> out_copy = output;
-    bool ok = results_match(out_copy, expected);
+    bool ok = results_match(output, expected);
 
     std::cout << "[" << (ok ? "PASS" : "FAIL") << "] " << name
               << " (N=" << N << ", K=" << K << ", tile=" << tile_size << ")\n";
@@ -189,6 +189,48 @@ int main() {
         std::vector<float> arr = {-5.0f, 0.0f, 3.0f, -1.0f, 7.0f,
                                    2.0f, -9.0f, 4.0f, 1.0f, 6.0f};
         run_test("Mixed +/-/0 (N=10, K=4)", arr, 4);
+    }
+
+    // ----------------------------------------------------------
+    // NaN filtering regressions: every tail length and lane.
+    {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        for (size_t tail = 1; tail < 8; ++tail) {
+            for (size_t lane = 0; lane < tail; ++lane) {
+                std::vector<float> arr(8 + tail, 0.0f);
+                for (size_t i = 0; i < tail; ++i) {
+                    arr[8 + i] = 10.0f + static_cast<float>(i);
+                }
+                arr[8 + lane] = nan;
+                for (size_t K : {size_t{1}, size_t{8}, arr.size()}) {
+                    run_test("Tail NaN length=" + std::to_string(tail) +
+                             " lane=" + std::to_string(lane), arr, K);
+                }
+            }
+
+            const size_t tile = 8 + tail;
+            std::vector<float> arr(2 * tile, -10.0f);
+            for (size_t i = 0; i < tail; ++i) {
+                arr[8 + i] = 10.0f + static_cast<float>(i);
+            }
+            arr[8] = nan;
+            run_test("NaN at internal tile tail, length=" + std::to_string(tail),
+                     arr, 8, tile);
+        }
+
+        for (size_t lane = 0; lane < 8; ++lane) {
+            std::vector<float> arr(16, 0.0f);
+            std::iota(arr.begin() + 8, arr.end(), 10.0f);
+            arr[8 + lane] = nan;
+            run_test("Full block NaN lane=" + std::to_string(lane), arr, 8);
+        }
+        run_test("All NaN blocks and tail", std::vector<float>(19, nan), 8);
+        run_test("All negative infinity", std::vector<float>(19, -inf), 8);
+        run_test("NaN-leading tail with infinities",
+                 {0, 0, 0, 0, 0, 0, 0, 0, nan, -inf, inf, 5}, 8);
+        run_test("Tail values equal to threshold",
+                 {5, 5, 5, 5, 5, 5, 5, 5, nan, 5, 5}, 8);
     }
 
     // ----------------------------------------------------------

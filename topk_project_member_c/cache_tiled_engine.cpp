@@ -30,13 +30,28 @@ static inline float get_threshold(const float* reservoir) {
     return reservoir[0];
 }
 
+static inline bool block_exceeds_threshold(const float* block, float threshold) {
+#if defined(__AVX2__)
+    const __m256 values = _mm256_loadu_ps(block);
+    const __m256 bound = _mm256_set1_ps(threshold);
+    // Ordered comparisons ignore NaNs without hiding valid lanes.
+    const __m256 exceeds = _mm256_cmp_ps(values, bound, _CMP_GT_OQ);
+    return _mm256_movemask_ps(exceeds) != 0;
+#else
+    for (size_t i = 0; i < 8; ++i) {
+        if (block[i] > threshold) return true;
+    }
+    return false;
+#endif
+}
+
 // ============================================================
 // Core engine: tiled streaming Top-K selection
 //
 // Key ideas:
 //   1. Process input in cache-resident tiles of size B
 //   2. Within each tile, scan elements in 8-wide blocks
-//   3. Early-discard entire blocks if max(block) <= threshold
+//   3. Early-discard blocks with no value above threshold
 //      (avoids calling the merge kernel on cold data)
 //   4. For surviving blocks, call simd_bitonic_merge_8
 //
@@ -96,17 +111,10 @@ void topk_tiled(
 
             // ------------------------------------------------
             // Early-discard filter:
-            // Compute max of the 8 elements manually.
-            // If max <= threshold, the entire block is below
-            // the current K-th bound — skip without merging.
-            // (Member B's SIMD kernel will do this via _mm256_max_ps)
+            // Compare all eight lanes to the broadcast threshold.
+            // Skip merging if no valid value exceeds the bound.
             // ------------------------------------------------
-            float blk_max = blk[0];
-            for (int i = 1; i < 8; ++i) {
-                if (blk[i] > blk_max) blk_max = blk[i];
-            }
-
-            if (blk_max <= threshold) {
+            if (!block_exceeds_threshold(blk, threshold)) {
                 continue;  // discard entire block
             }
 
@@ -129,8 +137,7 @@ void topk_tiled(
             std::fill(block, block + 8, -std::numeric_limits<float>::infinity());
             std::memcpy(block, tile_ptr + block_count * 8, remainder * sizeof(float));
 
-            float blk_max = *std::max_element(block, block + 8);
-            if (blk_max > threshold) {
+            if (block_exceeds_threshold(block, threshold)) {
                 simd_bitonic_merge_8(reservoir.data(), K, block);
             }
         }
