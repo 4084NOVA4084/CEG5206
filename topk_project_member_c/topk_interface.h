@@ -2,6 +2,8 @@
 #include <cstddef>
 
 // Unified top-level API
+// K = 0 writes nothing (output may be null). For K > N, the descending
+// result is padded with -infinity to K values. NaNs rank as -infinity.
 
 void topk_selector(const float* input, size_t N, size_t K, float* output);
 

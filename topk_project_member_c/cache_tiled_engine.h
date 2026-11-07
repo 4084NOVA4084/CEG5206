@@ -16,9 +16,12 @@
 // ============================================================
 
 // Primary entry point (implements topk_interface.h contract)
+// K = 0 writes nothing (output may be null). K > N returns all N values, then fills
+// output[N..K) with -infinity.
 void topk_selector(const float* input, size_t N, size_t K, float* output);
 
 // Exposed for testing/benchmarking individual tile sizes
+// Requires 1 <= K <= N
 void topk_tiled(
     const float* input,
     size_t N,

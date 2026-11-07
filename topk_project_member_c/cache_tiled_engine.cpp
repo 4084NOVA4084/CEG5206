@@ -30,20 +30,79 @@ static inline float get_threshold(const float* reservoir) {
     return reservoir[0];
 }
 
-static inline bool block_exceeds_threshold(const float* block, float threshold) {
-#if defined(__AVX2__)
+// ============================================================
+// Internal helper: early-discard test against a broadcast bound
+//
+// True if any of the 8 floats at block is strictly above the
+// current K-th bound. The caller broadcasts the bound once per
+// merge, which keeps the broadcast out of the scan loop.
+//
+// TOPK_ABLATE_FILTER is for the optimisation ladder only and is
+// off in every normal build (scripts/run_ablation.py):
+//   1 = no filter, every block goes to the merge kernel
+//   2 = scalar filter, lane by lane with an early exit
+// ============================================================
+
+#ifndef TOPK_ABLATE_FILTER
+#define TOPK_ABLATE_FILTER 0
+#endif
+
+#if TOPK_ABLATE_FILTER == 1
+using ThresholdVector = float;
+
+static inline ThresholdVector broadcast_threshold(float threshold) {
+    return threshold;
+}
+
+static inline bool block_exceeds_threshold(const float*, ThresholdVector) {
+    return true;
+}
+#elif TOPK_ABLATE_FILTER == 2
+using ThresholdVector = float;
+
+static inline ThresholdVector broadcast_threshold(float threshold) {
+    return threshold;
+}
+
+// The early exit keeps this scalar: compilers won't vectorise it.
+static inline bool block_exceeds_threshold(const float* block, ThresholdVector bound) {
+    for (int i = 0; i < 8; ++i) {
+        if (block[i] > bound) {
+            return true;
+        }
+    }
+    return false;
+}
+#elif defined(__AVX2__)
+using ThresholdVector = __m256;
+
+static inline ThresholdVector broadcast_threshold(float threshold) {
+    return _mm256_set1_ps(threshold);
+}
+
+static inline bool block_exceeds_threshold(const float* block, ThresholdVector bound) {
     const __m256 values = _mm256_loadu_ps(block);
-    const __m256 bound = _mm256_set1_ps(threshold);
     // Ordered comparisons ignore NaNs without hiding valid lanes.
     const __m256 exceeds = _mm256_cmp_ps(values, bound, _CMP_GT_OQ);
     return _mm256_movemask_ps(exceeds) != 0;
-#else
-    for (size_t i = 0; i < 8; ++i) {
-        if (block[i] > threshold) return true;
-    }
-    return false;
-#endif
 }
+#else
+using ThresholdVector = float;
+
+static inline ThresholdVector broadcast_threshold(float threshold) {
+    return threshold;
+}
+
+// Bitwise OR with no early exit: the compiler can vectorise this for
+// whatever ISA it targets, without -ffast-math.
+static inline bool block_exceeds_threshold(const float* block, ThresholdVector bound) {
+    int survivor = 0;
+    for (int i = 0; i < 8; ++i) {
+        survivor |= block[i] > bound;
+    }
+    return survivor != 0;
+}
+#endif
 
 // ============================================================
 // Core engine: tiled streaming Top-K selection
@@ -97,8 +156,9 @@ void topk_tiled(
             __builtin_prefetch(input + tile_start + tile_size_B, 0, 1);
         }
 
-        // Get current threshold once per tile (avoid repeated loads)
-        float threshold = get_threshold(reservoir.data());
+        // Broadcast the current threshold once per tile; it is only
+        // refreshed after a merge can have raised it
+        ThresholdVector bound = broadcast_threshold(get_threshold(reservoir.data()));
 
         // ----------------------------------------------------
         // Within-tile 8-wide block loop
@@ -114,7 +174,7 @@ void topk_tiled(
             // Compare all eight lanes to the broadcast threshold.
             // Skip merging if no valid value exceeds the bound.
             // ------------------------------------------------
-            if (!block_exceeds_threshold(blk, threshold)) {
+            if (!block_exceeds_threshold(blk, bound)) {
                 continue;  // discard entire block
             }
 
@@ -126,7 +186,7 @@ void topk_tiled(
             simd_bitonic_merge_8(reservoir.data(), K, blk);
 
             // Update threshold after merge (reservoir[0] may have changed)
-            threshold = get_threshold(reservoir.data());
+            bound = broadcast_threshold(get_threshold(reservoir.data()));
         }
 
         // ----------------------------------------------------
@@ -137,7 +197,7 @@ void topk_tiled(
             std::fill(block, block + 8, -std::numeric_limits<float>::infinity());
             std::memcpy(block, tile_ptr + block_count * 8, remainder * sizeof(float));
 
-            if (block_exceeds_threshold(block, threshold)) {
+            if (block_exceeds_threshold(block, bound)) {
                 simd_bitonic_merge_8(reservoir.data(), K, block);
             }
         }
@@ -156,9 +216,18 @@ void topk_tiled(
 // ============================================================
 // Default entry point (uses a sensible default tile size)
 // Tile = 1024 floats = 4KB → comfortably fits in L1d (typically 32–48KB)
+//
+// Edge cases match topk_selector_parallel: K = 0 writes nothing, and
+// K > N returns all N values, then fills output[N..K) with -infinity.
 // ============================================================
 
 void topk_selector(const float* input, size_t N, size_t K, float* output) {
+    if (K == 0) return;
+
     constexpr size_t DEFAULT_TILE_SIZE = 1024;  // sweep this in Task 5
-    topk_tiled(input, N, K, output, DEFAULT_TILE_SIZE);
+    const size_t K_valid = std::min(K, N);
+    if (K_valid > 0) {
+        topk_tiled(input, N, K_valid, output, DEFAULT_TILE_SIZE);
+    }
+    std::fill(output + K_valid, output + K, -std::numeric_limits<float>::infinity());
 }

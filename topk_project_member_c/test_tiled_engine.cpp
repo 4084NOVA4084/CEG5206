@@ -74,6 +74,40 @@ void run_test(const std::string& name,
 }
 
 // ============================================================
+// topk_selector runner: covers the K values topk_tiled rejects.
+// One extra output slot shows any write past output[K-1].
+// ============================================================
+void run_selector_test(const std::string& name,
+                       const std::vector<float>& input,
+                       size_t K,
+                       std::vector<float> expected)
+{
+    ++test_count;
+    constexpr float untouched = 42.0f;
+
+    std::vector<float> output(K + 1, untouched);
+    topk_selector(input.data(), input.size(), K, output.data());
+    if (K == 0) {
+        topk_selector(input.data(), input.size(), K, nullptr);
+    }
+    expected.push_back(untouched);
+
+    bool ok = results_match(output, expected);
+
+    std::cout << "[" << (ok ? "PASS" : "FAIL") << "] " << name
+              << " (N=" << input.size() << ", K=" << K << ")\n";
+    if (!ok) {
+        std::cout << "  Expected: ";
+        for (float v : expected) std::cout << v << " ";
+        std::cout << "\n  Got:      ";
+        for (float v : output)   std::cout << v << " ";
+        std::cout << "\n";
+    } else {
+        ++pass_count;
+    }
+}
+
+// ============================================================
 // Main: all test cases
 // ============================================================
 int main() {
@@ -234,7 +268,34 @@ int main() {
     }
 
     // ----------------------------------------------------------
-    // 12. Throughput benchmark
+    // 12. topk_selector edge cases: K = 0, K = N, K > N, N = 0
+    // ----------------------------------------------------------
+    {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+
+        run_selector_test("Selector K=0 writes nothing", {1, 2, 3}, 0, {});
+        run_selector_test("Selector N=0, K=0", {}, 0, {});
+        run_selector_test("Selector N=0 fills -inf", {}, 3, {-inf, -inf, -inf});
+        run_selector_test("Selector K=N", {1, 2, 3}, 3, {3, 2, 1});
+        run_selector_test("Selector K=N+1", {1, 2, 3}, 4, {3, 2, 1, -inf});
+        run_selector_test("Selector K>N with NaN", {1, nan, 3, -2, 5}, 9,
+                          {5, 3, 1, -2, -inf, -inf, -inf, -inf, -inf});
+
+        // N = 16 reaches the AVX2 merge, N = 2000 spans two tiles
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        for (size_t n : {size_t(16), size_t(2000)}) {
+            std::vector<float> arr(n);
+            for (auto& x : arr) x = dist(rng);
+            std::vector<float> expected = oracle_topk(arr, n);
+            expected.resize(n + 5, -inf);
+            run_selector_test("Selector K>N random", arr, n + 5, expected);
+            run_selector_test("Selector K<N random", arr, n / 2, oracle_topk(arr, n / 2));
+        }
+    }
+
+    // ----------------------------------------------------------
+    // 13. Throughput benchmark
     // ----------------------------------------------------------
     {
         std::cout << "\n=== Throughput Benchmark (tile sweep) ===\n";
