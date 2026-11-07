@@ -1,4 +1,5 @@
 #include "parallel_topk.h"
+#include "bench/topk_replace_top.h"
 #include "../topk_project_member_a/topk_baselines.h"
 #include "../topk_project_member_c/cache_tiled_engine.h"
 
@@ -19,8 +20,8 @@
 #include <omp.h>
 #endif
 
-// Week-11 milestone: every kernel x merge strategy x P against an FP64
-// oracle, run twice each so P- and rerun-determinism are checked too.
+// Checks every kernel x merge strategy x P against an FP64 oracle. Each case runs
+// twice, so the result must also be identical across reruns and across P.
 
 namespace {
 
@@ -165,6 +166,7 @@ std::vector<NamedKernel> make_kernels() {
          }},
         {"minheap", topk_minheap},
         {"nth_element", topk_nth_element},
+        {"replace_top", topk_replace_top},
     };
 }
 
@@ -303,7 +305,7 @@ void test_end_to_end(const std::vector<int>& thread_counts) {
         std::cout << "--- " << ds.name << ": " << (g_failures == before ? "ok" : "FAILED") << "\n";
     }
 
-    // Only the wrapper handles K > N; the kernels assert K <= N.
+    // The wrapper pads K > N itself, so a kernel only ever sees 1 <= K <= N.
     {
         const int before = g_failures;
         std::vector<float> small = {1.0f, kNaN, 3.0f, -2.0f, 5.0f};

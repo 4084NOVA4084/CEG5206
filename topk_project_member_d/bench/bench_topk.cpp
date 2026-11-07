@@ -1,5 +1,6 @@
 #include "bench_common.h"
 #include "perf_control.h"
+#include "topk_replace_top.h"
 #include "../parallel_topk.h"
 #include "../../topk_project_member_a/topk_baselines.h"
 #include "../../topk_project_member_c/cache_tiled_engine.h"
@@ -9,11 +10,16 @@
 #include <string>
 #include <vector>
 
+#ifndef TOPK_ABLATE_FILTER
+#define TOPK_ABLATE_FILTER 0
+#endif
+
 // One dataset per process (generation is the slow part); list options expand
 // to a cartesian product, one CSV row each:
 //   bench_topk --n 32M --algo heap,tiled,omp_tiled --k 8,64,1024 --threads 1,2,4,8
 // tiled = Member C's engine on B's kernel; omp_* = the wrapper around a kernel.
-// omp_heap is there to show thread scaling with no SIMD in the picture.
+// heap and nth are Member A's baselines; scalar is the hand-written replace-top.
+// omp_heap and omp_scalar show thread scaling with no SIMD in the picture.
 
 namespace {
 
@@ -87,6 +93,7 @@ bool uses_tile(const std::string& algo) { return algo == "tiled" || algo == "omp
 
 topk_kernel_fn single_thread_kernel(const std::string& algo, size_t tile) {
     if (algo == "heap" || algo == "omp_heap") return topk_minheap;
+    if (algo == "scalar" || algo == "omp_scalar") return topk_replace_top;
     if (algo == "nth" || algo == "omp_nth") return topk_nth_element;
     if (algo == "tiled" || algo == "omp_tiled") {
         return [tile](const float* in, size_t n, size_t k, float* out) {
@@ -132,14 +139,14 @@ int main(int argc, char** argv) {
     }
 
     // stderr: stdout must stay pure CSV for the harness
-    std::fprintf(stderr, "# bench_topk: omp_max_threads=%d avx2=%d n=%zu dist=%s\n",
+    std::fprintf(stderr, "# bench_topk: omp_max_threads=%d avx2=%d filter=%d n=%zu dist=%s\n",
                  bench::max_threads(),
 #if defined(__AVX2__)
                  1,
 #else
                  0,
 #endif
-                 opt.n, opt.dist.c_str());
+                 TOPK_ABLATE_FILTER, opt.n, opt.dist.c_str());
 
     bench::AlignedFloats data(opt.n);
     try {

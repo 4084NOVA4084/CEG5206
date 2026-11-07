@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Build outputs
+build/
+*.o
+*.exe
+*.dSYM/
+topk_project_member_a/validate_topk
+
+# Python
+__pycache__/

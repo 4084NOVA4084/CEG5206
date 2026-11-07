@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: ./scripts/run_all.sh [quick|full] [extra run_benchmarks.py args]
 # On the Linux box first:
-#   sudo sysctl kernel.perf_event_paranoid=1     # 2 is enough for user-space counters
+#   sudo sysctl kernel.perf_event_paranoid=1     # <= 2 allows user-space counters; 1 also allows --perf-kernel
 #   sudo cpupower frequency-set -g performance   # pinned clocks, less noise
 #   ./scripts/run_all.sh full --dram-peak-gbs <channels x MT/s x 8 / 1000>
 set -euo pipefail
@@ -24,14 +24,19 @@ export OMP_PLACES="${OMP_PLACES:-cores}"
 echo "== [1/4] build"
 make -j all
 
-echo "== [2/4] validation (race freedom + determinism across thread counts)"
-if [[ "$PRESET" == "quick" ]]; then
-    ./build/test_parallel_topk --quick
-else
-    ./build/test_parallel_topk
-fi
-
 OUT="results/$(date +%Y%m%d_%H%M%S)_${PRESET}"
+mkdir -p "$OUT"
+
+echo "== [2/4] validation (run_validation, then race freedom and determinism across thread counts)"
+{
+    ./build/test_integration
+    if [[ "$PRESET" == "quick" ]]; then
+        ./build/test_parallel_topk --quick
+    else
+        ./build/test_parallel_topk
+    fi
+} 2>&1 | tee "$OUT/validation.log"
+
 echo "== [3/4] benchmarks -> $OUT"
 "$PYTHON" scripts/run_benchmarks.py --preset "$PRESET" --no-build --out "$OUT" "$@"
 

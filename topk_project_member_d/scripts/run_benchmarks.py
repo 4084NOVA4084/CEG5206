@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark sweeps (+ perf stat on Linux) -> results/<timestamp>/
 
-    system_info.json   CPU, caches, compiler, perf availability
+    system_info.json   CPU, caches, compiler, perf availability, source version, power state
     throughput.csv     one row per (sweep, algo, N, K, P, tile, merge, dist)
     bandwidth.csv      stream-max GB/s vs working-set size
     perf_counters.csv  counters per config, timed region only (Linux)
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -40,6 +41,7 @@ PERF_EVENTS = [
 ]
 
 SWEEPS = ["size", "k", "scaling", "weak", "tile", "dist", "bandwidth", "perf"]
+SOURCE_SUFFIXES = {".cpp", ".h", ".py", ".sh"}
 
 
 def _run_text(cmd: List[str]) -> str:
@@ -126,6 +128,40 @@ def _linux_cache_size(level: str) -> Optional[int]:
                 mult = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30}[match.group(2)]
                 return int(match.group(1)) * mult
     return None
+
+
+def source_info(repo: Path = ROOT.parent) -> Dict:
+    """Which code produced the results. The hash also identifies a copy with no .git."""
+    digest = hashlib.sha256()
+    for member in sorted(repo.glob("topk_project_member_*")):
+        for path in sorted(member.rglob("*")):
+            skipped = {"build", "results"} & set(path.relative_to(member).parts)
+            wanted = path.suffix in SOURCE_SUFFIXES or path.name == "Makefile"
+            if path.is_file() and wanted and not skipped:
+                digest.update(path.relative_to(repo).as_posix().encode())
+                digest.update(path.read_bytes())
+    commit = _run_text(["git", "-C", str(repo), "rev-parse", "HEAD"]).strip() or None
+    status = _run_text(["git", "-C", str(repo), "status", "--short"]).splitlines()
+    return {"source_sha256": digest.hexdigest(), "git_commit": commit,
+            "git_dirty": bool(status) if commit else None, "git_status": status}
+
+
+def _read_text(path: Path) -> Optional[str]:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def power_info(sys_root: Path = Path("/sys")) -> Dict:
+    """CPU governor, boost and mains power; None outside Linux. Laptop timings depend on all three."""
+    governors = {_read_text(p) for p in
+                 sys_root.glob("devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor")}
+    mains = [_read_text(p.parent / "online") == "1"
+             for p in sys_root.glob("class/power_supply/*/type") if _read_text(p) == "Mains"]
+    return {"cpu_governor": ",".join(sorted(g for g in governors if g)) or None,
+            "cpu_boost": _read_text(sys_root / "devices/system/cpu/cpufreq/boost"),
+            "on_mains_power": any(mains) if mains else None}
 
 
 def thread_counts(physical: int, logical: int, limit: Optional[int]) -> List[int]:
@@ -340,12 +376,12 @@ def run_sweeps(runner: Runner, args: argparse.Namespace) -> None:
 
     if banner("size"):
         for n in sizes:
-            runner.bench("size", n, "heap,nth,tiled", [8, 64, 1024] if full else [64])
-            runner.bench("size", n, "omp_tiled,omp_heap", [8, 64, 1024] if full else [64],
+            runner.bench("size", n, "heap,scalar,nth,tiled", [8, 64, 1024] if full else [64])
+            runner.bench("size", n, "omp_tiled,omp_heap,omp_scalar", [8, 64, 1024] if full else [64],
                          threads=P_max)
 
     if banner("k"):
-        runner.bench("k", n_mid, "heap,tiled", ks_all)
+        runner.bench("k", n_mid, "heap,scalar,tiled", ks_all)
         runner.bench("k", n_mid, "omp_tiled", ks_all, threads=P_max)
         if full:
             runner.bench("k", n_mid, "nth", [8, 64, 1024])
@@ -354,7 +390,7 @@ def run_sweeps(runner: Runner, args: argparse.Namespace) -> None:
         merges = "seq,two,tree" if full else "seq,tree"
         runner.bench("scaling", n_big, "omp_tiled", [64, 1024] if full else [64],
                      threads=P_str, merges=merges)
-        runner.bench("scaling", n_big, "omp_heap", [64], threads=P_str)
+        runner.bench("scaling", n_big, "omp_heap,omp_scalar", [64], threads=P_str)
 
     if full and banner("weak"):  # 4M elements per thread
         for p in P_list:
@@ -366,11 +402,11 @@ def run_sweeps(runner: Runner, args: argparse.Namespace) -> None:
 
     if banner("dist"):
         for dist in ("uniform", "gaussian", "ascending", "descending", "duplicates", "special"):
-            runner.bench("dist", n_mid, "heap,tiled", [64], dist=dist)
+            runner.bench("dist", n_mid, "heap,scalar,tiled", [64], dist=dist)
             runner.bench("dist", n_mid, "omp_tiled", [64], threads=P_max, dist=dist)
 
     if banner("bandwidth"):
-        cmd = [str(BANDWIDTH), "--threads", f"1,{P_max}" + (f",{logical}" if logical > P_max else ""),
+        cmd = [str(BANDWIDTH), "--threads", P_str,
                "--min-size", "16K", "--max-size", "512M" if full else "256M", "--csv-header"]
         proc = runner._exec(cmd, timeout=3600)
         (runner.out / "bandwidth.csv").write_text(proc.stdout)
@@ -380,8 +416,9 @@ def run_sweeps(runner: Runner, args: argparse.Namespace) -> None:
             print("   perf not available (needs Linux + perf + perf_event_paranoid <= 2): skipped")
         else:
             for k in ([64, 1024] if full else [64]):
-                for algo, p in (("heap", 1), ("nth", 1), ("tiled", 1),
-                                ("omp_tiled", 1), ("omp_tiled", P_max), ("omp_heap", P_max)):
+                for algo, p in (("heap", 1), ("scalar", 1), ("nth", 1), ("tiled", 1),
+                                ("omp_tiled", 1), ("omp_tiled", P_max), ("omp_heap", P_max),
+                                ("omp_scalar", P_max)):
                     label = f"{algo}_P{p}_K{k}"
                     print(f"   perf: {label}")
                     runner.perf_bench(label, n_big, algo, k, p)
@@ -421,6 +458,8 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     sysinfo = detect_system()
+    sysinfo.update(source_info())
+    sysinfo.update(power_info())
     sysinfo["perf"] = perf_capabilities()
     sysinfo["preset"] = args.preset
     sysinfo["dram_peak_gbs"] = args.dram_peak_gbs
@@ -431,6 +470,9 @@ def main() -> int:
     print(f"== results -> {out}")
     print(f"   cpu: {sysinfo.get('cpu_model')}  physical cores: {sysinfo.get('physical_cores')}"
           f"  perf: {sysinfo['perf']}")
+    print(f"   source: {sysinfo['source_sha256'][:12]}  commit: {sysinfo['git_commit']}"
+          f"  dirty: {sysinfo['git_dirty']}  governor: {sysinfo['cpu_governor']}"
+          f"  mains: {sysinfo['on_mains_power']}")
 
     runner = Runner(args, out, sysinfo)
     try:

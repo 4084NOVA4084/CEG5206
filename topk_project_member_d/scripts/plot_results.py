@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""results/<timestamp>/ -> figures/*.{png,pdf} + summary.md. Only needs matplotlib.
+"""results/<timestamp>/ -> figures/*.{png,pdf} + summary.md.
 
     python3 scripts/plot_results.py results/<timestamp> [--format png,pdf]
-
-Any input CSV may be missing; the figures that need it are skipped.
 """
 from __future__ import annotations
 
@@ -13,7 +11,7 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -30,11 +28,13 @@ SLOTS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#625
 RAMP = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281", "#0d366b"]  # ordered series: K, threads
 
 ALGO_COLOR = {"tiled": SLOTS[0], "omp_tiled": SLOTS[1], "heap": SLOTS[2],
-              "nth": SLOTS[3], "omp_heap": SLOTS[4], "omp_nth": SLOTS[5]}
+              "nth": SLOTS[3], "omp_heap": SLOTS[4], "omp_nth": SLOTS[7],
+              "scalar": SLOTS[6], "omp_scalar": SLOTS[5]}
 ALGO_LABEL = {"tiled": "Tiled SIMD engine (1 thread)", "omp_tiled": "OpenMP + tiled SIMD",
               "heap": "Min-heap baseline", "nth": "nth_element baseline",
-              "omp_heap": "OpenMP + min-heap", "omp_nth": "OpenMP + nth_element"}
-ALGO_ORDER = ["omp_tiled", "tiled", "omp_heap", "heap", "omp_nth", "nth"]
+              "omp_heap": "OpenMP + min-heap", "omp_nth": "OpenMP + nth_element",
+              "scalar": "Hand-written scalar", "omp_scalar": "OpenMP + hand-written scalar"}
+ALGO_ORDER = ["omp_tiled", "tiled", "omp_scalar", "scalar", "omp_heap", "heap", "omp_nth", "nth"]
 MERGE_COLOR = {"seq": SLOTS[0], "two": SLOTS[1], "tree": SLOTS[2]}
 MERGE_LABEL = {"seq": "Sequential K-way", "two": "Two-level", "tree": "Pairwise tree"}
 K_MARKERS = ["o", "s", "^", "D"]
@@ -120,6 +120,7 @@ class Context:
         self.rows = load_csv(results / "throughput.csv")
         self.bw = load_csv(results / "bandwidth.csv")
         self.perf = load_csv(results / "perf_counters.csv")
+        self.ablation = load_csv(results / "ablation" / "ablation.csv")
         info_path = results / "system_info.json"
         self.info = json.loads(info_path.read_text()) if info_path.exists() else {}
         self.caches = {k: v for k, v in (self.info.get("cache_bytes") or {}).items() if v}
@@ -137,13 +138,21 @@ class Context:
         biggest = max(r["bytes"] for r in rows)
         return max(r["gbs"] for r in rows if r["bytes"] == biggest)
 
+    def dram_gbs_upto(self, threads: int) -> Optional[float]:
+        """Best stream rate measured with at most `threads` threads. A P-thread run could have
+        left cores idle, so the best rate at any count <= P is the ceiling it is compared with."""
+        rates = [self.dram_gbs(p) for p in self.bw_threads() if p <= threads]
+        return max((r for r in rates if r), default=None)
+
     def cache_peak_gbs(self, threads: int, max_bytes: float) -> Optional[float]:
         rows = [r for r in select(self.bw, threads=float(threads)) if r["bytes"] <= max_bytes]
         return max((r["gbs"] for r in rows), default=None)
 
-    def max_bw_threads(self) -> Optional[int]:
-        ts = self.bw_threads()
-        return max(ts) if ts else None
+    def dram_stream_peak(self) -> Tuple[Optional[float], Optional[int]]:
+        """Best stream rate at any thread count, and that count. Extra threads can lower the
+        rate, so the rate at the most threads is not the roof."""
+        best = max(self.bw_threads(), key=lambda p: self.dram_gbs(p) or 0, default=None)
+        return (self.dram_gbs(best), best) if best is not None else (None, None)
 
 
 def median_by(rows: Sequence[Dict], key: str, value: str = "melem_s") -> Dict:
@@ -163,13 +172,14 @@ def mark_caches(ax, ctx: Context, bytes_per_x: float = 4.0) -> None:
                     color=MUTED, va="bottom", ha="left")
 
 
-def ceiling(ax, y: float, label: str) -> None:
+def ceiling(ax, y: float, label: str = "") -> None:
     lo, hi = ax.get_ylim()
     if y * 1.02 >= hi:
         ax.set_ylim(lo, y * (1.3 if ax.get_yscale() == "log" else 1.1))
     ax.axhline(y, color=MUTED, linewidth=1.2, zorder=1)
-    ax.text(1.0, y, f"{label} ", transform=ax.get_yaxis_transform(), fontsize=7.5,
-            color=INK2, ha="right", va="bottom")
+    if label:
+        ax.text(1.0, y, f"{label} ", transform=ax.get_yaxis_transform(), fontsize=7.5,
+                color=INK2, ha="right", va="bottom")
 
 
 def fig_throughput_vs_n(ctx: Context, out: Path, fmts) -> None:
@@ -178,6 +188,7 @@ def fig_throughput_vs_n(ctx: Context, out: Path, fmts) -> None:
         return
     ks = unique(rows, "k")
     fig, axes = plt.subplots(1, len(ks), figsize=(4.6 * len(ks) + 2.6, 4.2), squeeze=False)
+    dram, dram_p = ctx.dram_stream_peak()
     for ax, k in zip(axes[0], ks):
         krows = select(rows, k=k)
         for algo in [a for a in ALGO_ORDER if select(krows, algo=a)]:
@@ -189,15 +200,14 @@ def fig_throughput_vs_n(ctx: Context, out: Path, fmts) -> None:
         ax.set_yscale("log")
         ax.yaxis.set_major_formatter(FuncFormatter(fmt_rate))
         mark_caches(ax, ctx)
-        for p in ctx.bw_threads():
-            gbs = ctx.dram_gbs(p)
-            if gbs:
-                ceiling(ax, gbs * 1e3 / 4, f"DRAM stream ceiling, {p} thr")
+        if dram:
+            ceiling(ax, dram * 1e3 / 4)  # no label: curves cross the line, the caption gives the value
         ax.set_title(f"K = {int(k)}")
         ax.set_xlabel("N (elements)")
         ax.set_ylabel("Throughput (MElem/s)")
     axes[0][-1].legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
-    caption(fig, "Median of repeated runs, uniform input. Vertical lines: N x 4 B equals cache capacity.")
+    note = f" Horizontal line: DRAM stream peak, {dram:.1f} GB/s at {dram_p} threads." if dram else ""
+    caption(fig, "Median of repeated runs, uniform input. Vertical lines: N x 4 B equals cache capacity." + note)
     save(fig, out, "throughput_vs_n", fmts)
 
 
@@ -228,13 +238,13 @@ def fig_speedup(ctx: Context, out: Path, fmts) -> None:
         return
     k = 64.0 if 64.0 in ks else ks[0]
     krows = select(rows, k=k)
-    baselines = [b for b in ("heap", "nth") if select(krows, algo=b)]
+    baselines = [b for b in ("scalar", "heap", "nth") if select(krows, algo=b)]
     if not baselines:
         return
     fig, axes = plt.subplots(1, len(baselines), figsize=(4.6 * len(baselines), 4.0), squeeze=False)
     for ax, base in zip(axes[0], baselines):
         base_t = median_by(select(krows, algo=base), "n", "median_ms")
-        for algo in ("omp_tiled", "tiled", "omp_heap"):
+        for algo in ("omp_tiled", "tiled", "omp_scalar", "omp_heap"):
             t = median_by(select(krows, algo=algo), "n", "median_ms")
             xs = sorted(set(t) & set(base_t))
             if xs:
@@ -293,9 +303,9 @@ def fig_scaling(ctx: Context, out: Path, fmts) -> None:
     ax2.set_ylabel("Effective bandwidth (GB/s)")
     ax2.set_title("Input bandwidth vs threads")
     ax2.set_ylim(bottom=0)
-    dram = ctx.dram_gbs(ctx.max_bw_threads()) if ctx.bw else None
+    dram, dram_p = ctx.dram_stream_peak()
     if dram:
-        ceiling(ax2, dram, f"DRAM stream ceiling ({ctx.max_bw_threads()} thr)")
+        ceiling(ax2, dram, f"DRAM stream peak ({dram_p} thr)")
     peak = ctx.info.get("dram_peak_gbs")
     if peak:
         ceiling(ax2, peak, "theoretical DRAM peak")
@@ -336,9 +346,9 @@ def fig_weak(ctx: Context, out: Path, fmts) -> None:
     ps = sorted(t)
     ax.plot(ps, [t[p]["gbs"] for p in ps], marker="o", color=ALGO_COLOR["omp_tiled"],
             label=ALGO_LABEL["omp_tiled"])
-    dram = ctx.dram_gbs(ctx.max_bw_threads()) if ctx.bw else None
+    dram, dram_p = ctx.dram_stream_peak()
     if dram:
-        ceiling(ax, dram, "DRAM stream ceiling")
+        ceiling(ax, dram, f"DRAM stream peak ({dram_p} thr)")
     ax.set_xticks(ps)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _p: f"{int(x)}"))
     ax.set_ylim(bottom=0)
@@ -436,10 +446,9 @@ def fig_roofline(ctx: Context, out: Path, fmts) -> None:
     size_rows = ctx.sweep("size")
     if not size_rows or not ctx.bw:
         return
-    p_max = ctx.max_bw_threads()
-    dram = ctx.dram_gbs(p_max)
+    dram, _ = ctx.dram_stream_peak()
     l2 = ctx.caches.get("L2", 1 << 20)
-    cache_peak = ctx.cache_peak_gbs(p_max, l2)
+    cache_peak = max((ctx.cache_peak_gbs(p, l2) or 0 for p in ctx.bw_threads()), default=None)
     # Compute roof only from a user-given peak; deriving one from a memory probe would be fiction.
     compute = ctx.info.get("peak_gops")
     oi_dram = 0.25  # one compare per 4-byte element
@@ -480,7 +489,7 @@ def fig_roofline(ctx: Context, out: Path, fmts) -> None:
     ax.set_title("Roofline: Top-K implementations vs memory roofs")
     ax.legend(loc="lower right", fontsize=7.5)
     caption(fig, f"OI = 1 compare / 4-byte element. Filled: N = {fmt_count(n_big)}; hollow: N = "
-                 f"{fmt_count(small_n)} (offset for legibility). Roofs at max threads.")
+                 f"{fmt_count(small_n)} (offset for legibility). Roofs: best rate at any thread count.")
     save(fig, out, "roofline", fmts)
 
 
@@ -522,6 +531,50 @@ def fig_counters(ctx: Context, out: Path, fmts) -> None:
     save(fig, out, "counters", fmts)
 
 
+def fig_ladder(ctx: Context, out: Path, fmts) -> None:
+    """Median and range of rounds per ladder step. Dots, not bars: the time axis is logarithmic."""
+    rows = select(ctx.ablation, ladder=1.0)
+    if not rows:
+        return
+    ks = unique(rows, "target_k")
+    labels = list(dict.fromkeys(r["label"] for r in rows))
+    fig, axes = plt.subplots(1, len(ks), figsize=(4.3 * len(ks) + 1.5, 0.42 * len(labels) + 1.5),
+                             sharex=True, sharey=True, squeeze=False)
+    peak = ctx.info.get("dram_peak_gbs")
+    floor_ms = rows[0]["n"] * 4 / (peak * 1e6) if peak else None
+    times_all = [r["median_ms"] for r in rows] + ([floor_ms] if floor_ms else [])
+    for ax, k in zip(axes[0], ks):
+        krows = select(rows, target_k=k)
+        for y, label in enumerate(labels):
+            members = select(krows, label=label)
+            if not members:
+                continue
+            times = sorted(r["median_ms"] for r in members)
+            mid = times[len(times) // 2]
+            color = ALGO_COLOR.get(members[0]["algo"], SLOTS[0])
+            ax.hlines(y, times[0], times[-1], color=color, linewidth=2, zorder=2)
+            ax.plot([mid], [y], marker="o", markersize=8, color=color, linestyle="none", zorder=3)
+            ax.annotate(f"{mid:.3g} ms", (times[-1], y), xytext=(8, 0), textcoords="offset points",
+                        fontsize=8.5, color=INK2, va="center")
+        ax.set_xscale("log")
+        ax.set_xlim(min(times_all) / 1.6, max(times_all) * 6)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _p: f"{x:g}"))
+        ax.xaxis.set_minor_formatter(NullFormatter())
+        ax.grid(axis="y", visible=False)
+        ax.set_title(f"K = {int(k)}")
+        ax.set_xlabel("Time (ms, log scale)")
+        if floor_ms:
+            ax.axvline(floor_ms, color=MUTED, linewidth=1.2, zorder=1)
+            ax.annotate(f"memory floor {floor_ms:.2f} ms", (floor_ms, -0.72), xytext=(4, 0),
+                        textcoords="offset points", fontsize=7.5, color=INK2, va="center")
+    axes[0][0].set_yticks(range(len(labels)))
+    axes[0][0].set_yticklabels(labels)
+    axes[0][0].set_ylim(len(labels) - 0.5, -1.0)
+    caption(fig, f"N = {fmt_count(rows[0]['n'])}, uniform input. Dot: median of rounds. "
+                 "Line: fastest to slowest round.")
+    save(fig, out, "ladder", fmts)
+
+
 def md_table(header: Sequence[str], rows: Sequence[Sequence]) -> str:
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
@@ -531,6 +584,9 @@ def md_table(header: Sequence[str], rows: Sequence[Sequence]) -> str:
 def write_summary(ctx: Context, out_md: Path) -> None:
     info = ctx.info
     parts = ["# Top-K benchmark summary\n"]
+    source = [["Commit", f"{info['git_commit']} (dirty: {info.get('git_dirty')})"]] if info.get("git_commit") else []
+    source += [["Source hash", info["source_sha256"][:16]]] if info.get("source_sha256") else []
+    source += [["Median of runs", ", ".join(info["aggregated_from"])]] if info.get("aggregated_from") else []
     parts.append(md_table(["Field", "Value"], [
         ["CPU", info.get("cpu_model", "?")],
         ["Physical / logical cores", f"{info.get('physical_cores')} / {info.get('logical_cpus')}"],
@@ -538,6 +594,7 @@ def write_summary(ctx: Context, out_md: Path) -> None:
         ["perf", info.get("perf")],
         ["Preset", info.get("preset")],
         ["Timestamp", info.get("timestamp")],
+        *source,
     ]))
 
     verified = [r.get("verified") for r in ctx.rows]
@@ -552,20 +609,22 @@ def write_summary(ctx: Context, out_md: Path) -> None:
         body = []
         for k in unique(size, "k"):
             rows = select(size, n=n_big, k=k)
+            scalar = select(rows, algo="scalar")
             heap = select(rows, algo="heap")
             nth = select(rows, algo="nth")
             for r in sorted(rows, key=lambda r: ALGO_ORDER.index(r["algo"])):
                 p = int(r["threads"])
-                bw = ctx.dram_gbs(p) if p in ctx.bw_threads() else None
+                bw = ctx.dram_gbs_upto(p)
                 body.append([
                     ALGO_LABEL.get(r["algo"], r["algo"]), int(k), p, f"{r['median_ms']:.3f}",
                     f"{r['melem_s']:.0f}", f"{r['gbs']:.1f}",
                     f"{100 * r['gbs'] / bw:.0f}%" if bw else "-",
+                    f"{scalar[0]['median_ms'] / r['median_ms']:.2f}x" if scalar else "-",
                     f"{heap[0]['median_ms'] / r['median_ms']:.2f}x" if heap else "-",
                     f"{nth[0]['median_ms'] / r['median_ms']:.2f}x" if nth else "-",
                 ])
         parts.append(md_table(["Implementation", "K", "P", "Median ms", "MElem/s", "GB/s",
-                               "% of DRAM stream (same P)", "vs heap", "vs nth"], body))
+                               "% of DRAM stream (<= P)", "vs scalar", "vs heap", "vs nth"], body))
 
     scaling = ctx.sweep("scaling")
     if scaling:
@@ -655,14 +714,15 @@ def main() -> int:
         ctx.info["dram_peak_gbs"] = args.dram_peak_gbs
     if args.peak_gops:
         ctx.info["peak_gops"] = args.peak_gops
-    if not ctx.rows and not ctx.bw and not ctx.perf:
+    if not ctx.rows and not ctx.bw and not ctx.perf and not ctx.ablation:
         print(f"no CSV data in {args.results}")
         return 1
     out = args.results / "figures"
     out.mkdir(exist_ok=True)
     fmts = [f.strip() for f in args.format.split(",") if f.strip()]
     for fig in (fig_throughput_vs_n, fig_throughput_vs_k, fig_speedup, fig_scaling, fig_merge,
-                fig_weak, fig_tile, fig_distributions, fig_bandwidth, fig_roofline, fig_counters):
+                fig_weak, fig_tile, fig_distributions, fig_bandwidth, fig_roofline, fig_counters,
+                fig_ladder):
         try:
             fig(ctx, out, fmts)
         except Exception as exc:  # one broken panel shouldn't cost the rest
