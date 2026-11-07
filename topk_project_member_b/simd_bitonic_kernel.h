@@ -139,6 +139,45 @@ inline sorted_block_16 bitonic_merge_top_16(
     const sorted_pair_8 low = bitonic_merge_8(left.low, high.low);
     return {low.high, high.high};
 }
+
+// ============================================================
+// Internal helper: NaN -> -infinity inside the register
+//
+// x != x only for NaN, so one compare builds the lane mask and
+// one blend applies it. A scalar isnan() test here compiles to
+// data-dependent jumps, which Task 2 rules out.
+// ============================================================
+
+inline __m256 normalize_nan_8(__m256 values) {
+    const __m256 is_nan = _mm256_cmp_ps(values, values, _CMP_UNORD_Q);
+    const __m256 neg_inf =
+        _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+    return _mm256_blendv_ps(values, neg_inf, is_nan);
+}
+
+// ============================================================
+// Internal helper: carry one sorted block down the reservoir
+//
+// Starts at the largest chunk. Each step keeps the upper eight
+// values in place and carries the lower eight to the next chunk;
+// the final carry falls off the bottom. The loop count depends
+// only on K, so nothing here branches on the data.
+// ============================================================
+
+inline void merge_block_into_reservoir(
+    float* topk_reservoir,
+    std::size_t K,
+    __m256 sorted_block
+) {
+    __m256 carry = sorted_block;
+    for (std::size_t offset = K; offset != 0; offset -= 8) {
+        const std::size_t index = offset - 8;
+        const __m256 reservoir = _mm256_loadu_ps(topk_reservoir + index);
+        const sorted_pair_8 merged = bitonic_merge_8(reservoir, carry);
+        _mm256_storeu_ps(topk_reservoir + index, merged.high);
+        carry = merged.low;
+    }
+}
 #endif
 
 // ============================================================
@@ -194,26 +233,20 @@ inline void simd_bitonic_merge_8(
     std::size_t K,
     const float* new_block_8
 ) {
+#if defined(__AVX2__)
+    if (K >= 8 && K % 8 == 0) {
+        const __m256 block = topk_detail::sort_block_bitonic(
+            topk_detail::normalize_nan_8(_mm256_loadu_ps(new_block_8)));
+        topk_detail::merge_block_into_reservoir(topk_reservoir, K, block);
+        return;
+    }
+#endif
+
+    // Portable path, and AVX2 builds whose K is not a multiple of 8.
     float sorted_block[8];
     std::copy(new_block_8, new_block_8 + 8, sorted_block);
     normalize_nan_block(sorted_block);
     topk_detail::sort_block_8(sorted_block);
-
-#if defined(__AVX2__)
-    if (K >= 8 && K % 8 == 0) {
-        __m256 carry = _mm256_loadu_ps(sorted_block);
-        for (std::size_t offset = K; offset != 0; offset -= 8) {
-            const std::size_t index = offset - 8;
-            const __m256 reservoir =
-                _mm256_loadu_ps(topk_reservoir + index);
-            const topk_detail::sorted_pair_8 merged =
-                topk_detail::bitonic_merge_8(reservoir, carry);
-            _mm256_storeu_ps(topk_reservoir + index, merged.high);
-            carry = merged.low;
-        }
-        return;
-    }
-#endif
 
     for (const float value : sorted_block) {
         if (value <= topk_reservoir[0]) {
