@@ -1,0 +1,43 @@
+{
+  "timestamp": "2026-11-08T02:11:15",
+  "platform": "Linux-5.15.0-139-generic-x86_64-with-glibc2.17",
+  "machine": "x86_64",
+  "hostname": "max-Lenovo-Legion-R9000X2021R",
+  "logical_cpus": 16,
+  "compiler": [
+    "c++ (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0"
+  ],
+  "cpu_model": "AMD Ryzen 7 5800H with Radeon Graphics",
+  "sockets": "1",
+  "threads_per_core": "2",
+  "l1d": "256 KiB",
+  "l2": "4 MiB",
+  "l3": "16 MiB",
+  "numa_nodes": "1",
+  "physical_cores": 8,
+  "cache_bytes": {
+    "L1d": 32768,
+    "L2": 524288,
+    "L3": 16777216
+  },
+  "perf_event_paranoid": "1",
+  "kernel": "5.15.0-139-generic",
+  "source_sha256": "34d261a70732f7e15fb5c91853a6b3f5017515f6d951446255d6bc21f3db31ff",
+  "git_commit": "6b3fd45273d06f021553bcd5d0ad17d296a2e5cd",
+  "git_dirty": false,
+  "git_status": [],
+  "cpu_governor": "performance",
+  "cpu_boost": "1",
+  "on_mains_power": true,
+  "perf": {
+    "available": true,
+    "fifo_roi": true
+  },
+  "preset": "full",
+  "dram_peak_gbs": 51.2,
+  "peak_gops": 512.0,
+  "omp_env": {
+    "OMP_PROC_BIND": "close",
+    "OMP_PLACES": "cores"
+  }
+}

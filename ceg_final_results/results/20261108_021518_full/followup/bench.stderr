@@ -1,0 +1,25 @@
+# bench_topk: omp_max_threads=16 avx2=1 filter=0 n=33554432 dist=uniform
+Events disabled
+# bench_topk: omp_max_threads=16 avx2=1 filter=0 n=1048576 dist=uniform
+Events enabled
+Events disabled
+Events disabled
+# bench_topk: omp_max_threads=16 avx2=1 filter=0 n=33554432 dist=uniform
+Events enabled
+Events disabled
+Events disabled
+# bench_topk: omp_max_threads=16 avx2=1 filter=0 n=33554432 dist=uniform
+Events enabled
+Events disabled
+Events disabled
+# bench_topk: omp_max_threads=16 avx2=1 filter=0 n=33554432 dist=uniform
+Events enabled
+Events disabled
+Events disabled
+# bench_topk: omp_max_threads=16 avx2=1 filter=0 n=33554432 dist=uniform
+Events enabled
+Events disabled
+Events disabled
+# bench_topk: omp_max_threads=16 avx2=1 filter=0 n=33554432 dist=uniform
+Events enabled
+Events disabled

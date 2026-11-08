@@ -1,0 +1,65 @@
+AVX2 path of Member B's kernel: enabled
+
+--- baselines
+min-heap: 24/24 tests passed
+nth_element: 24/24 tests passed
+replace-top: 24/24 tests passed
+
+--- tiled engine, single thread
+topk_selector: 24/24 tests passed
+tiled B=512: 24/24 tests passed
+tiled B=1024: 24/24 tests passed
+tiled B=2048: 24/24 tests passed
+tiled B=4096: 24/24 tests passed
+
+--- OpenMP wrapper on the tiled engine
+sequential P=1: 24/24 tests passed
+sequential P=2: 24/24 tests passed
+sequential P=4: 24/24 tests passed
+sequential P=8: 24/24 tests passed
+sequential P=16: 24/24 tests passed
+sequential P=32: 24/24 tests passed
+two-level P=1: 24/24 tests passed
+two-level P=2: 24/24 tests passed
+two-level P=4: 24/24 tests passed
+two-level P=8: 24/24 tests passed
+two-level P=16: 24/24 tests passed
+two-level P=32: 24/24 tests passed
+tree P=1: 24/24 tests passed
+tree P=2: 24/24 tests passed
+tree P=4: 24/24 tests passed
+tree P=8: 24/24 tests passed
+tree P=16: 24/24 tests passed
+tree P=32: 24/24 tests passed
+
+=== 26/26 implementations passed run_validation ===
+=== Member D: OpenMP Top-K validation ===
+OpenMP enabled, max threads = 16
+AVX2 path of Member B's kernel: enabled
+Thread counts: 1 2 3 4 5 7 8 16 32
+
+--- merge primitives
+    ok
+--- partition boundaries
+    ok
+--- uniform N=100000: ok
+--- gaussian N=65543: ok
+--- heavy duplicates (10 keys): ok
+--- all identical: ok
+--- +/-inf mixed: ok
+--- 10% NaN: ok
+--- almost all NaN (N=K): ok
+--- N=K=64: ok
+--- N=K=1000: ok
+--- N=1001 (not /8): ok
+--- N=99991 (prime): ok
+--- tiny N=5: ok
+--- N < P*K (N=100): ok
+--- ascending (adversarial): ok
+--- descending: ok
+--- signed zeros: ok
+--- denormals + FLT_MAX: ok
+--- K > N padding: ok
+--- topk_selector_parallel (N=3M): ok
+
+=== Summary: 24229/24229 checks passed ===

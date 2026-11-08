@@ -1,0 +1,3 @@
+algo,k,threads,n,reps,median_ms,l2_pf_miss_l2_hit_l3,l2_pf_miss_l2_l3,cache_lines,l3_hit_pct,to_memory_pct,l3_misses_per_elem
+tiled,64,1,1048576,20,0.279852,1318506,1053,1310720,100.59,0.08,0.00005
+tiled,64,1,33554432,20,5.910028,1370185,40699953,41943040,3.27,97.04,0.06065
